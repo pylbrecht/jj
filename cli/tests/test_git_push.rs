@@ -223,9 +223,9 @@ fn test_git_push_current_bookmark() {
     // This behavior is a strangeness of our definition of the default push revset.
     // We could consider changing it.
     let output = work_dir.run_jj(["git", "push"]);
-    insta::assert_snapshot!(output, @"
+    insta::assert_snapshot!(output, @r"
     ------- stderr -------
-    Warning: No bookmarks/tags found in the default push revset: remote_bookmarks(remote=origin)..@
+    Warning: No bookmarks/tags found in the default push revset: remote_bookmarks(remote=remote)..@ for origin
     Nothing changed.
     [EOF]
     ");
@@ -281,10 +281,10 @@ fn test_git_push_tag_in_default_target() {
         .run_jj(["tag", "set", "--allow-move", "-r@-", "tag1"])
         .success();
     let output = work_dir.run_jj(["git", "push"]);
-    insta::assert_snapshot!(output, @"
+    insta::assert_snapshot!(output, @r"
     ------- stderr -------
-    Changes to push to origin:
-      tag: tag1 [move sideways from 110db8edfa5f to b60842ac7691]
+    Warning: No bookmarks/tags found in the default push revset: remote_bookmarks(remote=remote)..@ for origin
+    Nothing changed.
     [EOF]
     ");
 }
@@ -296,9 +296,9 @@ fn test_git_push_no_matching_bookmark() {
     let work_dir = test_env.work_dir("local");
     work_dir.run_jj(["new"]).success();
     let output = work_dir.run_jj(["git", "push"]);
-    insta::assert_snapshot!(output, @"
+    insta::assert_snapshot!(output, @r"
     ------- stderr -------
-    Warning: No bookmarks/tags found in the default push revset: remote_bookmarks(remote=origin)..@
+    Warning: No bookmarks/tags found in the default push revset: remote_bookmarks(remote=remote)..@ for origin
     Nothing changed.
     [EOF]
     ");
@@ -311,9 +311,9 @@ fn test_git_push_matching_bookmark_unchanged() {
     let work_dir = test_env.work_dir("local");
     work_dir.run_jj(["new", "bookmark1"]).success();
     let output = work_dir.run_jj(["git", "push"]);
-    insta::assert_snapshot!(output, @"
+    insta::assert_snapshot!(output, @r"
     ------- stderr -------
-    Warning: No bookmarks/tags found in the default push revset: remote_bookmarks(remote=origin)..@
+    Warning: No bookmarks/tags found in the default push revset: remote_bookmarks(remote=remote)..@ for origin
     Nothing changed.
     [EOF]
     ");
@@ -357,9 +357,9 @@ fn test_git_push_other_remote_has_bookmark() {
     ");
     // Since it's already pushed to origin, nothing will happen if push again
     let output = work_dir.run_jj(["git", "push"]);
-    insta::assert_snapshot!(output, @"
+    insta::assert_snapshot!(output, @r"
     ------- stderr -------
-    Warning: No bookmarks/tags found in the default push revset: remote_bookmarks(remote=origin)..@
+    Warning: No bookmarks/tags found in the default push revset: remote_bookmarks(remote=remote)..@ for origin
     Nothing changed.
     [EOF]
     ");
@@ -3040,6 +3040,112 @@ fn test_git_push_named_multiple_remotes_from_config() {
       bookmark: named-bookmark [add to d7738fce4d92]
     Changes to push to other_2:
       bookmark: named-bookmark [add to d7738fce4d92]
+    [EOF]
+    ");
+}
+
+#[test]
+fn test_git_push_custom_revset() {
+    let test_env = TestEnvironment::default();
+    set_up(&test_env);
+    let work_dir = test_env.work_dir("local");
+    // add a custom revset which simulates keeping a custom set of local only
+    // bookmarks.
+    test_env.add_config(
+        r#"
+    [revsets]
+    'git-push' = "tracked_remote_bookmarks(remote=remote)..@"
+    "#,
+    );
+    work_dir
+        .run_jj(["new", "bookmark2", "-m", "commit to be pushed"])
+        .success();
+    work_dir.run_jj(["new", "-m", "wip: stuff"]).success();
+    work_dir
+        .run_jj(["bookmark", "set", "local/stuff", "-r@"])
+        .success();
+    work_dir
+        .run_jj(["new", "-m", "commit which should pushed"])
+        .success();
+    //
+    let output = work_dir.run_jj(["log"]);
+    insta::assert_snapshot!(output, @r"
+    @  kpqxywon test.user@example.com 2001-02-03 08:05:17 048a6554
+    │  (empty) commit which should pushed
+    ○  yostqsxw test.user@example.com 2001-02-03 08:05:15 local/stuff 0712d559
+    │  (empty) wip: stuff
+    ○  vruxwmqv test.user@example.com 2001-02-03 08:05:14 a615282a
+    │  (empty) commit to be pushed
+    ○  zsuskuln test.user@example.com 2001-02-03 08:05:10 bookmark2 38a20473
+    │  (empty) description 2
+    │ ○  qpvuntsm test.user@example.com 2001-02-03 08:05:08 bookmark1 9b2e76de
+    ├─╯  (empty) description 1
+    ◆  zzzzzzzz root() 00000000
+    [EOF]
+    ");
+    // We should try to push everything except the commit on the "local/" bookmark.
+    let output = work_dir.run_jj(["git", "push"]);
+    insta::assert_snapshot!(output, @r"
+    ------- stderr -------
+    Warning: Refusing to create new remote bookmark local/stuff@origin
+    Hint: Run `jj bookmark track local/stuff@origin` and try again.
+    Nothing changed.
+    [EOF]
+    ");
+}
+
+// This tests that `exact: <remote>` isn't changed to a substring pattern.
+#[test]
+fn test_git_push_unambigous_remote() {
+    let test_env = TestEnvironment::default();
+
+    test_env.run_jj_in(".", ["git", "init", "local"]).success();
+    let work_dir = test_env.work_dir("local");
+
+    add_remote(&test_env, &work_dir, "stream");
+    add_remote(&test_env, &work_dir, "upstream");
+
+    work_dir.run_jj(["desc", "--message=S"]).success();
+    work_dir.run_jj(["bookmark", "set", "bookmark1"]).success();
+    work_dir
+        .run_jj([
+            "bookmark",
+            "track",
+            "bookmark1",
+            "--remote=stream",
+            "--remote=upstream",
+        ])
+        .success();
+    work_dir
+        .run_jj(["git", "push", "--bookmark=bookmark1", "--remote=stream"])
+        .success();
+
+    work_dir.run_jj(["new", "bookmark1", "-m", "U"]).success();
+    work_dir
+        .run_jj(["bookmark", "move", "bookmark1", "--to=@"])
+        .success();
+    work_dir
+        .run_jj(["git", "push", "--bookmark=bookmark1", "--remote=upstream"])
+        .success();
+
+    let output = work_dir
+        .run_jj(["bookmark", "list", "--all-remotes", "--quiet"])
+        .success();
+
+    insta::assert_snapshot!(output, @"
+    bookmark1: kmkuslsw b0487cf1 (empty) U
+      @stream (behind by 1 commits): qpvuntsm 10bd0600 (empty) S
+      @upstream: kmkuslsw b0487cf1 (empty) U
+    [EOF]
+    ");
+
+    let output = work_dir
+        .run_jj(["git", "push", "--remote=stream"])
+        .success();
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Changes to push to stream:
+      bookmark: bookmark1 [move forward from 10bd06005bf2 to b0487cf1d23e]
     [EOF]
     ");
 }
